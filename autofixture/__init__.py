@@ -12,7 +12,175 @@ from autofixture.exceptions import AutoFixtureException
 T = typing.TypeVar("T")
 
 
+class FieldGenerator:
+    __slots__ = ('predictable_func', 'random_func')
+    
+    def __init__(self, predictable_func, random_func):
+        self.predictable_func = predictable_func
+        self.random_func = random_func
+    
+    def __call__(self, is_predictable, key, target_obj, num=None, seed=None, list_limit=10, **kwargs):
+        if is_predictable:
+            value = self.predictable_func(num=num, seed=seed, key=key, **kwargs)
+        else:
+            value = self.random_func(key=key, list_limit=list_limit, **kwargs)
+        setattr(target_obj, key, value)
+
+
+class ListFieldGenerator(FieldGenerator):
+    __slots__ = ('element_generator',)
+    
+    def __init__(self, element_generator):
+        self.element_generator = element_generator
+        super().__init__(self._predictable_list, self._random_list)
+    
+    def _predictable_list(self, num, key, **kwargs):
+        return [self.element_generator(num=num, key=key, index=i, **kwargs) for i in range(num)]
+    
+    def _random_list(self, key, list_limit, **kwargs):
+        return [self.element_generator(key=key, index=i, **kwargs) 
+                for i in range(rand.randint(0, list_limit))]
+
+
+class TypeRegistry:
+    __slots__ = ('_generators',)
+    
+    def __init__(self):
+        self._generators = {}
+        self._setup_default_generators()
+    
+    def register(self, type_key, generator):
+        self._generators[type_key] = generator
+    
+    def get_generator(self, type_key):
+        return self._generators.get(type_key)
+    
+    def _setup_default_generators(self):
+        # String generators
+        self.register(str, FieldGenerator(
+            lambda num, seed, key, **kw: f"{key}{seed}",
+            lambda key, **kw: f"{key}{str(uuid.uuid4()).split('-')[0]}"
+        ))
+        
+        # Integer generators
+        self.register(int, FieldGenerator(
+            lambda num, **kw: num,
+            lambda **kw: rand.randint(0, 100)
+        ))
+        
+        # Float generators
+        self.register(float, FieldGenerator(
+            lambda num, **kw: float(f"{num}.{''.join(str(num) for _ in range(num))}"),
+            lambda **kw: rand.uniform(0, 100)
+        ))
+        
+        # Boolean generators
+        self.register(bool, FieldGenerator(
+            lambda num, **kw: bool(num),
+            lambda **kw: rand.choice([True, False])
+        ))
+        
+        # Decimal generators
+        self.register(Decimal, FieldGenerator(
+            lambda num, **kw: Decimal(str(float(f"{num}.{''.join(str(num) for _ in range(num))}"))),
+            lambda **kw: Decimal(str(rand.uniform(0, 100)))
+        ))
+        
+        # Datetime generators
+        self.register(datetime.datetime, FieldGenerator(
+            lambda num, **kw: datetime.datetime(num, num, num, num, num, num),
+            lambda **kw: datetime.datetime.now(datetime.timezone.utc)
+        ))
+        
+        # List generators
+        self.register(list[str], ListFieldGenerator(
+            lambda num, seed, key, index, **kw: f"{key}{seed}{index}" if seed else f"{key}{str(uuid.uuid4()).split('-')[0]}"
+        ))
+        
+        self.register(list[int], ListFieldGenerator(
+            lambda num, index, **kw: num + index if num else rand.randint(0, 100)
+        ))
+        
+        self.register(list[float], ListFieldGenerator(
+            lambda num, index, **kw: float(f"{num}.{''.join(str(num) for _ in range(num))}") if num else rand.uniform(0, 100)
+        ))
+        
+        self.register(list[bool], ListFieldGenerator(
+            lambda num, **kw: bool(num) if num else rand.choice([True, False])
+        ))
+        
+        self.register(list[datetime.datetime], ListFieldGenerator(
+            lambda num, **kw: datetime.datetime(2, 2, 2, 2, 2, 2) if num else datetime.datetime.now(datetime.timezone.utc)
+        ))
+        
+        self.register(list[decimal.Decimal], ListFieldGenerator(
+            lambda num, **kw: Decimal(str(float(f"{num}.{''.join(str(num) for _ in range(num))}"))) if num else Decimal(str(rand.uniform(0, 100)))
+        ))
+
+
+class EnumGenerator(FieldGenerator):
+    __slots__ = ('enum_type',)
+    
+    def __init__(self, enum_type):
+        self.enum_type = enum_type
+        super().__init__(self._predictable_enum, self._random_enum)
+    
+    def _predictable_enum(self, num, **kwargs):
+        enum_list = list(self.enum_type)
+        return enum_list[num % len(enum_list)]
+    
+    def _random_enum(self, **kwargs):
+        return rand.choice(list(self.enum_type))
+
+
+class EnumListGenerator(ListFieldGenerator):
+    __slots__ = ('enum_type',)
+    
+    def __init__(self, enum_type):
+        self.enum_type = enum_type
+        enum_gen = EnumGenerator(enum_type)
+        super().__init__(lambda **kw: enum_gen._predictable_enum(**kw) if kw.get('num') else enum_gen._random_enum(**kw))
+
+
+class ObjectGenerator:
+    __slots__ = ('autofixture_instance',)
+    
+    def __init__(self, autofixture_instance):
+        self.autofixture_instance = autofixture_instance
+    
+    def __call__(self, obj_type, is_predictable, key, target_obj, num=None, seed=None, nest=0, **kwargs):
+        created_obj = self.autofixture_instance.create(
+            dto=obj_type, seed=seed, num=num, nest=nest + 1
+        )
+        setattr(target_obj, key, created_obj)
+
+
+class ObjectListGenerator:
+    __slots__ = ('autofixture_instance',)
+    
+    def __init__(self, autofixture_instance):
+        self.autofixture_instance = autofixture_instance
+    
+    def __call__(self, obj_type, is_predictable, key, target_obj, num=None, seed=None, nest=0, list_limit=10, **kwargs):
+        if is_predictable:
+            objects = [self.autofixture_instance.create(dto=obj_type, seed=seed, num=num, nest=nest + 1) 
+                      for _ in range(num)]
+        else:
+            objects = [self.autofixture_instance.create(dto=obj_type, seed=seed, num=num, nest=nest + 1) 
+                      for _ in range(rand.randint(0, list_limit))]
+        setattr(target_obj, key, objects)
+
+
 class AutoFixture:
+    
+    def __init__(self):
+        self.type_registry = TypeRegistry()
+        self.object_generator = ObjectGenerator(self)
+        self.object_list_generator = ObjectListGenerator(self)
+    
+    def register_custom_generator(self, type_key, generator):
+        """Allow users to register custom field generators"""
+        self.type_registry.register(type_key, generator)
 
     def create_many_dict(self, dto,
                          ammount,
@@ -71,259 +239,70 @@ class AutoFixture:
 
         members = all_annotations(cls=dto).items()
         for (key, _type) in members:
-
-            if (getattr(new_value, key) is None) or (
-                    typing.get_origin(_type) is list and getattr(new_value, key) == []):
-
-                if typing.get_origin(_type) is typing.Union:
-                    args = typing.get_args(_type)
-                    non_none_args = [a for a in args if a is not NoneType]
-                    if len(non_none_args) == 1:
-                        _type = non_none_args[0]
-
-                if _type is str:
-                    self.__generate_string_field(is_predictable_data, key, new_value, seed)
-
-                if _type is bool:
-                    self.__generate_bool_field(is_predictable_data, key, new_value, num)
-
-                if _type == datetime.datetime:
-                    self.__generate_datetime_field(is_predictable_data, key, new_value, num)
-
-                if _type is int:
-                    self.__generate_int_field(is_predictable_data, key, new_value, num)
-
-                if _type is float:
-                    self.__generate_float_field(is_predictable_data, key, new_value, num)
-
-                if _type is Decimal:
-                    self.__generate_decimal_field(is_predictable_data, key, new_value, num)
-
-                if _type == list[str]:
-                    self.__generate_str_list_field(is_predictable_data, key, new_value, num, seed, list_limit)
-
-                if _type == list[int]:
-                    self.__generate_int_list_field(is_predictable_data, key, new_value, num, list_limit)
-
-                if _type == list[bool]:
-                    self.__generate_bool_list_field(is_predictable_data, key, new_value, num, list_limit)
-
-                if _type == list[datetime.datetime]:
-                    self.__generate_datetime_list_field(is_predictable_data, key, new_value, num, list_limit)
-
-                if _type == list[float]:
-                    self.__generate_float_list_field(is_predictable_data, key, new_value, num, list_limit)
-
-                if _type == list[decimal.Decimal]:
-                    self.__generate_decimal_list_field(is_predictable_data, key, new_value, num, list_limit)
-
-                if type(_type) is type(Enum):
-                    self.__generate_random_enum_field(_type, is_predictable_data, key, new_value, num)
-
-
-                if has_type_hints(_type):
-                    self.__generate_class_field(_type, key, nest, new_value, num, seed)
-
-                if typing.get_origin(_type) is list:
-                    arg = typing.get_args(_type)[0]
-                    if type(arg) is type(Enum):
-                        self.__generate_list_of_enums_field(arg, is_predictable_data, key, new_value, num, list_limit)
-                    if bool(typing.get_type_hints(arg)):
-                        self.__generate_class_list(arg, is_predictable_data, key, nest, new_value, num, seed,
-                                                   list_limit)
+            if self._should_generate_field(new_value, key, _type):
+                self._generate_field(key, _type, new_value, is_predictable_data, 
+                                   num, seed, nest, list_limit)
 
         return new_value
-
-    def __generate_class_field(self, _type, key, nest, new_value, num, seed):
-        setattr(new_value, key, self.create(dto=_type,
-                                            seed=seed,
-                                            num=num,
-                                            nest=nest + 1))
-
-    def __generate_class_list(self, _type, is_predictable_data, key, nest, new_value, num, seed, list_limit):
-        if is_predictable_data:
-            value_for_given_member = []
-            for i in range(0, num):
-                value_for_given_member.append(self.create(dto=_type,
-                                                          seed=seed,
-                                                          num=num,
-                                                          nest=nest + 1))
-        else:
-            value_for_given_member = []
-            for i in range(0, rand.randint(0, list_limit)):
-                value_for_given_member.append(self.create(dto=_type,
-                                                          seed=seed,
-                                                          num=num,
-                                                          nest=nest + 1))
-        setattr(new_value, key, value_for_given_member)
-
-    def __generate_list_of_enums_field(self, _type, is_predictable_data, key, new_value, num, list_limit):
-        if is_predictable_data:
-            value_for_given_member = []
-            for i in range(0, num):
-                enum_iterable = list(_type)
-                length = len(enum_iterable)
-                index = num % length
-                value_for_given_member.append(enum_iterable[index])
-        else:
-            value_for_given_member = []
-            for i in range(0, rand.randint(0, list_limit)):
-                value_for_given_member.append(rand.choice(list(_type)))
-        setattr(new_value, key, value_for_given_member)
-
-    def __generate_random_enum_field(self, _type, is_predictable_data, key, new_value, num):
-        if is_predictable_data:
-            enum_iterable = list(_type)
-            length = len(enum_iterable)
-            index = num % length
-            value_for_given_member = enum_iterable[index]
-        else:
-            value_for_given_member = rand.choice(list(_type))
-        setattr(new_value, key, value_for_given_member)
-
-    def __generate_datetime_list_field(self, is_predictable_data, key, new_value, num, list_limit):
-        if is_predictable_data:
-            value_for_given_member = []
-            for i in range(0, num):
-                value_for_given_member.append(datetime.datetime(2, 2, 2, 2, 2, 2))
-        else:
-            value_for_given_member = []
-            for i in range(0, rand.randint(0, list_limit)):
-                value_for_given_member.append(datetime.datetime.utcnow())
-        setattr(new_value, key, value_for_given_member)
-
-    def __generate_bool_list_field(self, is_predictable_data, key, new_value, num, list_limit):
-        if is_predictable_data:
-            value_for_given_member = []
-            for i in range(0, num):
-                value_for_given_member.append(bool(num))
-        else:
-            value_for_given_member = []
-            for i in range(0, rand.randint(0, list_limit)):
-                value_for_given_member.append(rand.choice([True, False]))
-        setattr(new_value, key, value_for_given_member)
-
-    def __generate_datetime_field(self, is_predictable_data, key, new_value, num):
-        if is_predictable_data:
-            value_for_given_member = datetime.datetime(num, num, num, num, num, num)
-        else:
-            value_for_given_member = datetime.datetime.utcnow()
-        setattr(new_value, key, value_for_given_member)
-
-    def __generate_bool_field(self, is_predictable_data, key, new_value, num):
-        if is_predictable_data:
-            value_for_given_member = bool(num)
-        else:
-            value_for_given_member = rand.choice([True, False])
-        setattr(new_value, key, value_for_given_member)
-
-    @staticmethod
-    def __generate_float_list_field(is_predictable_data, key, new_value, num, list_limit):
-        if is_predictable_data:
-            value_for_given_member = []
-            for i in range(0, num):
-                trailing_decimals = ""
-                for i in range(0, num):
-                    trailing_decimals = f"{trailing_decimals}{num}"
-                value_for_given_member_item = float(f"{num}.{trailing_decimals}")
-                value_for_given_member.append(value_for_given_member_item)
-        else:
-            value_for_given_member = []
-            for i in range(0, rand.randint(0, list_limit)):
-                value_for_given_member.append(rand.uniform(0, 100))
-        setattr(new_value, key, value_for_given_member)
-
-    @staticmethod
-    def __generate_decimal_list_field(is_predictable_data, key, new_value, num, list_limit):
-        if is_predictable_data:
-            value_for_given_member = []
-            for i in range(0, num):
-                trailing_decimals = ""
-                for i in range(0, num):
-                    trailing_decimals = f"{trailing_decimals}{num}"
-                value_for_given_member_item = float(f"{num}.{trailing_decimals}")
-                value_for_given_member.append(Decimal(str(value_for_given_member_item)))
-        else:
-            value_for_given_member = []
-            for i in range(0, rand.randint(0, list_limit)):
-                value_for_given_member.append(Decimal(str(rand.uniform(0, 100))))
-        setattr(new_value, key, value_for_given_member)
-
-    @staticmethod
-    def __generate_int_list_field(is_predictable_data, key, new_value, num, list_limit):
-        if is_predictable_data:
-            value_for_given_member = []
-            for i in range(0, num):
-                value_for_given_member.append(num + i)
-        else:
-            value_for_given_member = []
-            for i in range(0, rand.randint(0, list_limit)):
-                value_for_given_member.append(rand.randint(0, 100))
-        setattr(new_value, key, value_for_given_member)
-
-    def __generate_str_list_field(self, is_predictable_data, key, new_value, num, seed, list_limit):
-        if is_predictable_data:
-            value_for_given_member = []
-            for i in range(0, num):
-                value_for_given_member_item = key
-                value_for_given_member_item = f"{value_for_given_member_item}{seed}{i}"
-                value_for_given_member.append(value_for_given_member_item)
-        else:
-            value_for_given_member = []
-            for i in range(0, rand.randint(0, list_limit)):
-                value_for_given_member_item = key
-                value_for_given_member_item = f"{value_for_given_member_item}{self.__generate_random_seed()}"
-                value_for_given_member.append(value_for_given_member_item)
-        setattr(new_value, key, value_for_given_member)
-
-    @staticmethod
-    def __generate_random_seed() -> str:
-        return str(uuid.uuid4()).split("-")[0]
+    
+    def _should_generate_field(self, obj, key, field_type):
+        current_value = getattr(obj, key)
+        return (current_value is None or 
+                (typing.get_origin(field_type) is list and current_value == []))
+    
+    def _normalize_optional_type(self, field_type):
+        if typing.get_origin(field_type) is typing.Union:
+            args = typing.get_args(field_type)
+            non_none_args = [a for a in args if a is not NoneType]
+            if len(non_none_args) == 1:
+                return non_none_args[0]
+        return field_type
+    
+    def _generate_field(self, key, field_type, target_obj, is_predictable, 
+                       num, seed, nest, list_limit):
+        field_type = self._normalize_optional_type(field_type)
+        
+        # Handle enums
+        if type(field_type) is type(Enum):
+            generator = EnumGenerator(field_type)
+            generator(is_predictable, key, target_obj, num=num, seed=seed)
+            return
+        
+        # Handle list of enums
+        if typing.get_origin(field_type) is list:
+            args = typing.get_args(field_type)
+            if args and type(args[0]) is type(Enum):
+                generator = EnumListGenerator(args[0])
+                generator(is_predictable, key, target_obj, num=num, seed=seed, list_limit=list_limit)
+                return
+            
+            # Handle list of custom objects
+            if args and has_type_hints(args[0]):
+                self.object_list_generator(args[0], is_predictable, key, target_obj, 
+                                         num=num, seed=seed, nest=nest, list_limit=list_limit)
+                return
+        
+        # Handle custom objects
+        if has_type_hints(field_type):
+            self.object_generator(field_type, is_predictable, key, target_obj, 
+                                num=num, seed=seed, nest=nest)
+            return
+        
+        # Handle registered types
+        generator = self.type_registry.get_generator(field_type)
+        if generator:
+            generator(is_predictable, key, target_obj, num=num, seed=seed, list_limit=list_limit)
+            return
+        
+        # Fallback - type not supported
+        raise AutoFixtureException(f"Unsupported type: {field_type}")
 
     @staticmethod
     def __validate_predictable_data(num, seed):
         if seed is not None and num is None:
             raise AutoFixtureException("seed and num must be both set to create predictable data")
-        if seed is not None and num is None:
+        if num is not None and seed is None:
             raise AutoFixtureException("seed and num must be both set to create predictable data")
-
-    @staticmethod
-    def __generate_float_field(is_predictable_data, key, new_value, num):
-        if is_predictable_data:
-            trailing_decimals = ""
-            for i in range(0, num):
-                trailing_decimals = f"{trailing_decimals}{num}"
-            value_for_given_member = float(f"{num}.{trailing_decimals}")
-        else:
-            value_for_given_member = rand.uniform(0, 100)
-        setattr(new_value, key, value_for_given_member)
-
-    @staticmethod
-    def __generate_decimal_field(is_predictable_data, key, new_value, num):
-        if is_predictable_data:
-            trailing_decimals = ""
-            for i in range(0, num):
-                trailing_decimals = f"{trailing_decimals}{num}"
-            value_for_given_member = float(f"{num}.{trailing_decimals}")
-        else:
-            value_for_given_member = rand.uniform(0, 100)
-        setattr(new_value, key, Decimal(str(value_for_given_member)))
-
-    @staticmethod
-    def __generate_int_field(is_predictable_data, key, new_value, num):
-        if is_predictable_data:
-            value_for_given_member = num
-        else:
-            value_for_given_member = rand.randint(0, 100)
-        setattr(new_value, key, value_for_given_member)
-
-    def __generate_string_field(self, is_predictable_data, key, new_value, seed):
-        value_for_given_member = key
-        if is_predictable_data:
-            value_for_given_member = f'{value_for_given_member}{seed}'
-        else:
-            value_for_given_member = f'{value_for_given_member}{self.__generate_random_seed()}'
-        setattr(new_value, key, value_for_given_member)
 
 
 def all_annotations(cls):
@@ -350,5 +329,5 @@ def has_type_hints(t):
         # Normal class/type, try to get hints safely
         try:
             return bool(typing.get_type_hints(t))
-        except Exception:
+        except (TypeError, AttributeError, NameError):
             return False
